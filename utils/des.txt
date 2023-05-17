@@ -1,0 +1,309 @@
+Step 1: Set up the project:
+Create a new directory and initialize a new npm project with the command:
+
+mkdir express-authentication-api
+cd express-authentication-api
+npm init -y
+
+Copy
+Install the following dependencies:
+
+npm install express mongoose dotenv bcrypt jsonwebtoken express-async-handler
+
+Copy
+Here's what each of the dependencies are for:
+
+Express: Create the API.
+Mongoose: Connect our application to MongoDB.
+Dotenv: Load environment variables.
+Bcrypt: Hash passwords.
+Jsonwebtoken: Create and verify JSON Web Tokens.
+Express-async-handler: Handle async errors in our routes.
+Create a .env file in the root directory and add the following variables:
+
+PORT = 3000
+DB_URI = mongodb://localhost:27017/db_name
+JWT_SECRET = your-secret-key
+
+Copy
+Step 2: Set up the database:
+Create a db.js file in the config directory and add the following code:
+
+const mongoose = require('mongoose');
+const { DB_URI } = process.env;
+
+const connectDB = async () => {
+    try {
+        const conn = await mongoose.connect(DB_URI, {
+            useNewUrlParser: true,
+            useUnifiedTopology: true,
+            useCreateIndex: true,
+            useFindAndModify: false
+        });
+        console.log(`MongoDB connected: ${conn.connection.host}`);
+    } catch (err) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+    }
+};
+
+module.exports = connectDB;
+
+Copy
+This code will connect our application to MongoDB using the mongoose library and load the DB_URI variable from the .env file.
+
+Create a User model in the models directory and add the following code:
+
+const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
+
+const userSchema = mongoose.Schema({
+    name: {
+        type: String,
+        required: true
+    },
+    email: {
+        type: String,
+        required: true,
+        unique: true
+    },
+    password: {
+        type: String,
+        required: true
+    }
+}, {
+    timestamps: true
+});
+
+userSchema.methods.matchPassword = async function (enteredPassword) {
+    return await bcrypt.compare(enteredPassword, this.password);
+};
+
+userSchema.pre('save', async function (next) {
+    if (!this.isModified('password')) {
+        next();
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+});
+
+const User = mongoose.model('User', userSchema);
+
+module.exports = User;
+
+Copy
+This code defines a User schema which has fields for name, email, and password. It also has a method to hash and compare the password during authentication.
+
+Step 3: Set up the routes:
+In the routes directory, create a file called authRoutes.js and add the following code:
+
+const express = require('express');
+const router = express.Router();
+const { registerUser, authUser, getUserProfile } = require('../controllers/authController');
+const { protect } = require('../middleware/authMiddleware');
+
+router.post('/register', registerUser);
+router.post('/login', authUser);
+router.get('/profile', protect, getUserProfile);
+
+module.exports = router;
+
+Copy
+This code defines 3 routes: register, login, and profile. The register and login routes will be unprotected, but the profile route will be protected using the protect middleware.
+
+In the controllers directory, create a file called authController.js and add the following code:
+
+const asyncHandler = require('express-async-handler');
+const generateToken = require('../utils/generateToken');
+const User = require('../models/User');
+
+const registerUser = asyncHandler(async (req, res) => {
+    const { name, email, password } = req.body;
+
+    const userExists = await User.findOne({ email });
+
+    if (userExists) {
+        res.status(400);
+        throw new Error('User already exists');
+    }
+
+    const user = await User.create({ name, email, password });
+
+    if (user) {
+        res.status(201).json({
+            _id: user._id,
+            name: user.name,
+            email: user.email,
+            token: generateToken(user._id)
+        });
+    } else {
+        res.status(400);
+        throw new Error('Invalid user data');
+    }
+});
+
+const authUser = asyncHandler(async (req, res) => {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+
+    if (user && (await user.matchPassword(password))) {
+        res.json({
+            _id: user._id,
+            name: user.name,
+            email: user.email,
+            token: generateToken(user._id)
+        });
+    } else {
+        res.status(401);
+        throw new Error('Invalid email or password');
+    }
+});
+
+const getUserProfile = asyncHandler(async (req, res) => {
+    const user = await User.findById(req.user._id);
+
+    if (user) {
+        res.json({
+            _id: user._id,
+            name: user.name,
+            email: user.email
+        });
+    } else {
+        res.status(404);
+        throw new Error('User not found');
+    }
+});
+
+module.exports = { registerUser, authUser, getUserProfile };
+
+Copy
+This code defines 3 methods: registerUser, authUser, and getUserProfile. The registerUser method creates a new user, the authUser method authenticates a user and generates a JWT token, and the getUserProfile method gets the information of the authenticated user.
+
+Step 4: Set up the middleware:
+In the middleware directory, create a file called authMiddleware.js and add the following code:
+
+const jwt = require('jsonwebtoken');
+const asyncHandler = require('express-async-handler');
+const User = require('../models/User');
+
+const protect = asyncHandler(async (req, res, next) => {
+    let token;
+
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+        try {
+            token = req.headers.authorization.split(' ')[1];
+
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+            req.user = await User.findById(decoded.id).select('-password');
+        } catch (err) {
+            console.error(err);
+            res.status(401);
+            throw new Error('Not authorized, token failed');
+        }
+    }
+
+    if (!token) {
+        res.status(401);
+        throw new Error('Not authorized, no token');
+    }
+
+    next();
+});
+
+module.exports = { protect };
+
+Copy
+This code defines a protect middleware that will verify the JWT token and add the authenticated user to the request object for use in the routes.
+
+Step 5: Set up the entry point:
+In the root directory, create an app.js file and add the following code:
+
+const express = require('express');
+const connectDB = require('./config/db');
+const authRoutes = require('./routes/authRoutes');
+
+const app = express();
+
+// Connect to database
+connectDB();
+
+app.use(express.json());
+
+// Routes
+app.use('/api/auth', authRoutes);
+
+// Error handling
+app.use((err, req, res, next) => {
+    const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+    res.status(statusCode);
+    res.json({
+        message: err.message,
+        stack: process.env.NODE_ENV === 'production' ? null : err.stack
+    });
+});
+
+const { PORT } = process.env;
+app.listen(PORT, console.log(`Server running on port ${PORT}`));
+
+Copy
+This code sets up the Express server and connects to the MongoDB database using the connectDB function defined in the db.js file. It also adds the authRoutes middleware to handle the authentication routes.
+
+In the utils directory, create a file called generateToken.js and add the following code:
+
+const jwt = require('jsonwebtoken');
+
+const generateToken = (id) => {
+    return jwt.sign({ id }, process.env.JWT_SECRET, {
+        expiresIn: '30d'
+    });
+};
+
+module.exports = generateToken;
+
+Copy
+This code defines a function to generate a JWT token that includes the user's ID and an expiration date of 30 days.
+
+Step 6: Test the API:
+Start the API by running the command:
+
+node app.js
+
+Copy
+Use a tool like Postman or cURL to test the API. Here are some sample requests:
+
+Register a new user:
+
+POST http://localhost:3000/api/auth/register
+
+{
+    "name": "John Doe",
+    "email": "johndoe@example.com",
+    "password": "password"
+}
+
+Copy
+Authenticate user and log in:
+
+POST http://localhost:3000/api/auth/login
+
+{
+    "email": "johndoe@example.com",
+    "password": "password"
+}
+
+Copy
+Get information of authenticated user:
+
+GET http://localhost:3000/api/auth/profile
+
+Authorization: Bearer <JWT_TOKEN>
+
+Copy
+Replace <JWT_TOKEN> with the token generated from the login request.
+
+That's it! You've successfully created an authentication API using Express and MongoDB with protected routes using JWT token authentication.
+
+
